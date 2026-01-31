@@ -280,6 +280,7 @@ class Machine:
                 addr = core.scratch[addr]
                 for vi in range(VLEN):
                     self.scratch_write[dest + vi] = self.mem[addr + vi]
+                    # print(str(vi) + " loading: val " + str(self.mem[addr + vi]) + " from " + str(addr + vi) + "\n")
             case ("const", dest, val):
                 self.scratch_write[dest] = (val) % (2**32)
             case _:
