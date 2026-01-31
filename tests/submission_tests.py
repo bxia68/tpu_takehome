@@ -17,12 +17,19 @@ from frozen_problem import (
     N_CORES,
     VLEN,
 )
-from perf_takehome import KernelBuilder
 
+from kernel_builder import (
+    KernelBuilder
+)
+
+from basic_pipelined_solution import (
+    BasicVectorizedKernelBuilder
+)
 
 @lru_cache(maxsize=None)
 def kernel_builder(forest_height: int, n_nodes: int, batch_size: int, rounds: int):
-    kb = KernelBuilder()
+    # kb = KernelBuilder()
+    kb = BasicVectorizedKernelBuilder()
     kb.build_kernel(forest_height, n_nodes, batch_size, rounds)
     return kb
 

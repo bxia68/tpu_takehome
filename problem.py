@@ -144,9 +144,10 @@ class Machine:
         return res
 
     def rewrite_slot(self, slot):
-        return tuple(
-            self.debug_info.scratch_map.get(s, (None, None))[0] or s for s in slot
-        )
+        pass
+        # return tuple(
+        #     self.debug_info.scratch_map.get(s, (None, None))[0] or s for s in slot
+        # )
 
     def setup_trace(self):
         """
@@ -252,6 +253,7 @@ class Machine:
         self.scratch_write[dest] = res
 
     def valu(self, core, *slot):
+        # print(slot)
         match slot:
             case ("vbroadcast", dest, src):
                 for i in range(VLEN):
@@ -269,7 +271,7 @@ class Machine:
     def load(self, core, *slot):
         match slot:
             case ("load", dest, addr):
-                # print(dest, addr, core.scratch[addr])
+                print(dest, addr, core.scratch[addr])
                 self.scratch_write[dest] = self.mem[core.scratch[addr]]
             case ("load_offset", dest, addr, offset):
                 # Handy for treating vector dest and addr as a full block in the mini-compiler if you want
@@ -277,10 +279,10 @@ class Machine:
                     core.scratch[addr + offset]
                 ]
             case ("vload", dest, addr):  # addr is a scalar
-                addr = core.scratch[addr]
+                addr_val = core.scratch[addr]
+                print(f"vload: dest={dest}, addr_scratch={addr}, addr_val={addr_val}, mem_len={len(self.mem)}")
                 for vi in range(VLEN):
-                    self.scratch_write[dest + vi] = self.mem[addr + vi]
-                    # print(str(vi) + " loading: val " + str(self.mem[addr + vi]) + " from " + str(addr + vi) + "\n")
+                    self.scratch_write[dest + vi] = self.mem[addr_val + vi]
             case ("const", dest, val):
                 self.scratch_write[dest] = (val) % (2**32)
             case _:

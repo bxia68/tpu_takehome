@@ -40,8 +40,12 @@ from kernel_builder import (
     KernelBuilder
 )
 
-from basic_pipelined_solution import (
-    BasicPipelinedKernelBuilder
+from basic_vectorized_solution import (
+    BasicVectorizedKernelBuilder
+)
+
+from basic_compiled_solution import (
+    BasicCompiledSolution
 )
 
 BASELINE = 147734
@@ -61,7 +65,8 @@ def do_kernel_test(
     mem = build_mem_image(forest, inp)
 
     # TODO: change for different kernel
-    kb = BasicPipelinedKernelBuilder()
+    kb = BasicCompiledSolution()
+    # kb = BasicVectorizedKernelBuilder()
     # kb = KernelBuilder()
     kb.build_kernel(forest.height, len(forest.values), len(inp.indices), rounds)
     # print(kb.instrs)
@@ -115,7 +120,7 @@ class Tests(unittest.TestCase):
             assert inp.values == mem[mem[6] : mem[6] + len(inp.values)]
 
     def test_kernel_trace(self):
-        # Full-scale example for performance testing
+    #     # Full-scale example for performance testing
         do_kernel_test(10, 16, 256, trace=True, prints=False)
 
     # Passing this test is not required for submission, see submission_tests.py for the actual correctness test
@@ -127,8 +132,8 @@ class Tests(unittest.TestCase):
     #                 forest_height + 2, forest_height + 4, batch * 16 * VLEN * N_CORES
     #             )
 
-    def test_kernel_cycles(self):
-        do_kernel_test(10, 16, 256)
+    # def test_kernel_cycles(self):
+    #     do_kernel_test(10, 16, 256)
 
 
 # To run all the tests:

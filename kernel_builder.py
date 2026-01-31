@@ -29,10 +29,13 @@ class KernelBuilder:
     def debug_info(self):
         return DebugInfo(scratch_map=self.scratch_debug)
 
-    def build(self, slots: list[tuple[Engine, tuple | list]], vliw: bool = False):
-        # Simple slot packing that just uses one slot per instruction bundle
+    def build(self, slots):
         instrs = []
-        for engine, slot in slots:
+        for line in slots:
+            if isinstance(line, dict):
+                instrs.append(line)
+                continue
+            engine, slot = line
             if isinstance(slot, tuple):
                 instrs.append({engine: [slot]})
             else:

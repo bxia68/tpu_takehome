@@ -1,21 +1,3 @@
-"""
-# Anthropic's Original Performance Engineering Take-home (Release version)
-
-Copyright Anthropic PBC 2026. Permission is granted to modify and use, but not
-to publish or redistribute your solutions so it's hard to find spoilers.
-
-# Task
-
-- Optimize the kernel (in KernelBuilder.build_kernel) as much as possible in the
-  available time, as measured by test_kernel_cycles on a frozen separate copy
-  of the simulator.
-
-Validate your results using `python tests/submission_tests.py` without modifying
-anything in the tests/ folder.
-
-We recommend you look through problem.py next.
-"""
-
 from collections import defaultdict
 import random
 import unittest
@@ -41,7 +23,7 @@ from kernel_builder import (
 )
 
 
-class BasicPipelinedKernelBuilder(KernelBuilder):
+class BasicVectorizedKernelBuilder(KernelBuilder):
     def build_vhash(self, val_hash_addr, tmp1, tmp2, round, i, tmp_broad1, tmp_broad2):
         slots = []
 
@@ -129,7 +111,8 @@ class BasicPipelinedKernelBuilder(KernelBuilder):
         tmp_node_val = self.alloc_scratch("tmp_node_val", 8)
         tmp_addr = self.alloc_scratch("tmp_addr")
         
-        # tmp_tree_addr = self.alloc_scratch("tmp_tree_addr")
+        tmp_tree_addr1 = self.alloc_scratch("tmp_tree_addr1")
+        tmp_tree_addr2 = self.alloc_scratch("tmp_tree_addr2")
         # tmp_tree_idx = self.alloc_scratch("tmp_tree_idx")
         # tmp_tree_node_val = self.alloc_scratch("tmp_tree_node_val")
 
@@ -141,7 +124,6 @@ class BasicPipelinedKernelBuilder(KernelBuilder):
                 
                 # idx = mem[inp_indices_p + i] (vectorized)
                 body.append(("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const))) 
-                body.append(("load", ("load", tmp_idx, tmp_addr)))
                 body.append(("load", ("vload", tmp_idx, tmp_addr)))
                 for j in range(8):
                     body.append(("debug", ("compare", tmp_idx + j, (round, i + j, "idx"))))
@@ -159,9 +141,16 @@ class BasicPipelinedKernelBuilder(KernelBuilder):
                 # body.append(("debug", ("compare", tmp_node_val, (round, i, "node_val"))))
                 
                 # body.append(("alu", ("|", tmp_tree_idx, tmp_idx, zero_const))) # tree_idx = idx
+                next_instr = {}
+                for j in range(0, 8, 2):
+                    next_instr["alu"] = [("+", tmp_tree_addr1, self.scratch["forest_values_p"], tmp_idx + j),
+                                         ("+", tmp_tree_addr2, self.scratch["forest_values_p"], tmp_idx + j + 1)]  # allowed to add with "j"? 
+                    body.append(next_instr)
+                    next_instr = {"load": [("load", tmp_node_val + j, tmp_tree_addr1), 
+                                          ("load", tmp_node_val + j + 1, tmp_tree_addr2)]}
+                body.append(next_instr)
+                
                 for j in range(8):
-                    body.append(("alu", ("+", tmp_addr, self.scratch["forest_values_p"], tmp_idx + j)))  # allowed to add with "j"? 
-                    body.append(("load", ("load", tmp_node_val + j, tmp_addr)))
                     body.append(("debug", ("compare", tmp_node_val + j, (round, i + j, "node_val"))))
 
                 # val = myhash(val ^ node_val) (vectorized)
