@@ -58,12 +58,18 @@ class Instruction:
             self.dst = getVectorAddrs(self.dst[0])
         if ((engine == "valu" and instruction[0] != "vbroadcast") or
             instruction[0] == "vselect"):
+            # For valu (except vbroadcast) and vselect, dependencies are vectors
             tmp = self.dep_list
             self.dep_list = []
             for dep in tmp:
                 self.dep_list.extend(getVectorAddrs(dep))
-        elif engine == "vstore":
-            self.dep_list.extend(self.dep_list.pop())
+        elif instruction[0] == "vstore":
+            # vstore: addr is scalar, src is vector
+            # dep_list = (addr, src) -> addr stays scalar, src becomes vector
+            addr = self.dep_list[0]  # scalar address
+            src = self.dep_list[1]   # vector source
+            self.dep_list = [addr] + getVectorAddrs(src)
+        # Note: vload has scalar addr dependency (don't expand it)
             
         # global test1
         # global test2
@@ -88,6 +94,9 @@ def getVectorAddrs(addr: int) -> list[int]:
 class DAGKernelBuilder(KernelBuilder):
     def __init__(self):
         super().__init__()
+        self.clear()
+        
+    def clear(self):
         self.RAW_graph = defaultdict(list)          # (cache addr, version) (int, int) -> instruction ids (list[int])
         self.WAR_graph = defaultdict(list)          # (cache addr, version) (int, int) -> instruction ids (list[int])
         self.indegree = []                          # instruction id (int) -> indegree (int)
@@ -97,6 +106,8 @@ class DAGKernelBuilder(KernelBuilder):
         self.WAR_indegree = defaultdict(int)
         self.cache_versions = [0] * 1536
         self.instruction_count = 0
+        self.finished_set = set()
+        self.barrier_list = []
 
     def add_node(self, instruction: Instruction):
         # add instruction
@@ -105,10 +116,7 @@ class DAGKernelBuilder(KernelBuilder):
         self.instruction_list.append(instruction)
         self.indegree.append(0)
         
-        if instruction.graph_id == 22:
-            pass
-        
-        # populate dependency graph for read dependencies
+        # populate dependency graph
         for dep in instruction.dep_list:
             if self.cache_versions[dep] > 0:
                 self.RAW_graph[(dep, self.cache_versions[dep])].append(instruction.graph_id)
@@ -123,6 +131,15 @@ class DAGKernelBuilder(KernelBuilder):
                 self.indegree[instruction.graph_id] -= 1
             self.cache_versions[dst] += 1
             self.dst_version[(instruction.graph_id, dst)] = self.cache_versions[dst]
+    
+    # def add_barrier(self) -> int:
+    #     barrier_id = self.instruction_count
+    #     self.instruction_count += 1
+    #     self.barrier_list.append(barrier_id)
+    #     return barrier_id
+    
+    # def wait_barrier(self, barrier_id: int):
+        
 
     def compile_kernel(self) -> list[dict]:
         compiled_instructions = []
@@ -139,39 +156,32 @@ class DAGKernelBuilder(KernelBuilder):
             if indegree == 0:
                 job_queue.append(current_id)
 
-        # print("############")
         while len(job_queue) > 0 or len([val for queue in engine_queue.values() for val in queue]) > 0:
-            # print("############")
             while len(job_queue) > 0:
                 current_id = job_queue.popleft()
                 instruction = self.instruction_list[current_id]
                 engine_queue[instruction.engine].append(instruction)
                 
-                dependents = []
-                for dep in instruction.dep_list:
-                    dependents.extend(self.WAR_graph[(dep, self.dep_version[(instruction.graph_id, dep)])])
-                for adj_id in dependents:
-                    self.indegree[adj_id] -= 1
-                    if self.indegree[adj_id] == 0:
-                        job_queue.append(adj_id)
-
             # add instructions to current cycle
             engine_list = ["alu", "valu", "load", "store", "flow"]
             cycle_instructions = {}
             finished_list = []
             for engine in engine_list:
+                engine_queue[engine].sort(key=lambda x: x.graph_id)
                 if len(engine_queue[engine]) > 0:
                     cycle_instructions[engine] = [x.instruction for x in engine_queue[engine][:SLOT_LIMITS[engine]]]
                     finished_list.extend(engine_queue[engine][:SLOT_LIMITS[engine]])
                     engine_queue[engine] = engine_queue[engine][SLOT_LIMITS[engine]:]
+            
             compiled_instructions.append(cycle_instructions)
             
             # signal dependent instructions
             for finished in finished_list:
-                # print(finished.instruction)
                 dependents = []
                 for dst in finished.dst:
                     dependents.extend(self.RAW_graph[(dst, self.dst_version[(finished.graph_id, dst)])])
+                for dep in finished.dep_list:
+                    dependents.extend(self.WAR_graph[(dep, self.dep_version[(finished.graph_id, dep)])])
                 for adj_id in dependents:
                     self.indegree[adj_id] -= 1
                     if self.indegree[adj_id] == 0:
@@ -179,13 +189,3 @@ class DAGKernelBuilder(KernelBuilder):
         
         return compiled_instructions
     
-    def clear(self):
-        self.RAW_graph = defaultdict(list)          # (cache addr, version) (int, int) -> instruction ids (list[int])
-        self.WAR_graph = defaultdict(list)          # (cache addr, version) (int, int) -> instruction ids (list[int])
-        self.indegree = []                          # instruction id (int) -> indegree (int)
-        self.instruction_list = []                  # instruction id (int) -> instruction
-        self.dst_version = {}                       # (instruction id, cache addr) (int, int) -> dst cache version (int)
-        self.dep_version = {}                       # (instruction id, cache addr) (int, int) -> dep cache version (int)
-        self.WAR_indegree = defaultdict(int)
-        self.cache_versions = [0] * 1536
-        self.instruction_count = 0

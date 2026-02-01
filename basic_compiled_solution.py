@@ -115,7 +115,7 @@ class BasicCompiledSolution(DAGKernelBuilder):
         self.add("debug", ("comment", "Starting loop"))
 
         # TODO: start
-        block_size = 4
+        block_size = 16
         vector_size = 8
         
         # vector/scalar scratch registers
@@ -128,6 +128,10 @@ class BasicCompiledSolution(DAGKernelBuilder):
         tmp_val_v = self.alloc_scratch("tmp_val", block_size * vector_size)
         tmp_node_val_v = self.alloc_scratch("tmp_node_val", block_size * vector_size)
         tmp_addr_v = self.alloc_scratch("tmp_addr", block_size * vector_size)
+        
+        for group_id in range(batch_size // (block_size * vector_size)):
+            for block_id in range(block_size):
+                self.scratch_const(group_id * block_size * vector_size + block_id * vector_size)
         
         for round in range(rounds):
             for group_id in range(batch_size // (block_size * vector_size)):
@@ -157,22 +161,9 @@ class BasicCompiledSolution(DAGKernelBuilder):
                     self.add_node(Instruction("load", ("vload", tmp_val, tmp_addr)))
 
                     # pull tree nodes
-                    # for j in range(0, 8, 2):
-                    #     self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["forest_values_p"], tmp_idx + j)))
-                    #     self.add_node(Instruction("alu", ("+", tmp_addr + 1, self.scratch["forest_values_p"], tmp_idx + j + 1))) # TODO: can vectorize
-                    #     self.add_node(Instruction("load", ("load", tmp_node_val + j, tmp_addr)))
-                    #     self.add_node(Instruction("load", ("load", tmp_node_val + j + 1, tmp_addr + 1)))
                     for j in range(8):
                         self.add_node(Instruction("alu", ("+", tmp_addr + j, self.scratch["forest_values_p"], tmp_idx + j)))
                         self.add_node(Instruction("load", ("load", tmp_node_val + j, tmp_addr + j)))
-
-                    # body_instrs = self.compile_kernel()
-                    # self.instrs.extend(body_instrs)
-                    # self.clear()
-                    
-                    # self.instrs.append(
-                    #     {"debug": [("vcompare", tmp_node_val, [(round, i + j, "node_val") for j in range(8)])]}
-                    # )
 
                     # val = myhash(val ^ node_val) (vectorized)
                     self.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
@@ -180,14 +171,6 @@ class BasicCompiledSolution(DAGKernelBuilder):
                         self.add_node(Instruction("valu", (op1, tmp1, tmp_val, hash_array1 + hi * vector_size)))
                         self.add_node(Instruction("valu", (op3, tmp2, tmp_val, hash_array2 + hi * vector_size)))
                         self.add_node(Instruction("valu", (op2, tmp_val, tmp1, tmp2)))
-                        
-                    # body_instrs = self.compile_kernel()
-                    # self.instrs.extend(body_instrs)
-                    # self.clear()
-
-                    # self.instrs.append(
-                    #     {"debug": [("vcompare", tmp_val, [(round, i + j, "hashed_val") for j in range(8)])]}
-                    # )
 
                     # idx = 2*idx + (1 if val % 2 == 0 else 2)
                     self.add_node(Instruction("valu", ("%", tmp1, tmp_val, two_const_v)))
@@ -200,14 +183,6 @@ class BasicCompiledSolution(DAGKernelBuilder):
                     self.add_node(Instruction("valu", ("<", tmp1, tmp_idx, n_nodes_v)))
                     self.add_node(Instruction("flow", ("vselect", tmp_idx, tmp1, tmp_idx, zero_const_v)))
 
-                    # body_instrs = self.compile_kernel()
-                    # self.instrs.extend(body_instrs)
-                    # self.clear()
-
-                    # self.instrs.append(
-                    #     {"debug": [("vcompare", tmp_idx, [(round, group_id * block_size * vector_size + j, "wrapped_idx") for j in range(8)])]}
-                    # )
-
                     # mem[inp_indices_p + i] = idx
                     self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["inp_indices_p"], i_const)))
                     self.add_node(Instruction("store", ("vstore", tmp_addr, tmp_idx)))
@@ -216,13 +191,6 @@ class BasicCompiledSolution(DAGKernelBuilder):
                     self.add_node(Instruction("alu", ("+", tmp_addr, self.scratch["inp_values_p"], i_const)))
                     self.add_node(Instruction("store", ("vstore", tmp_addr, tmp_val)))
                     
-                    # body_instrs = self.compile_kernel()
-                    # self.instrs.extend(body_instrs)
-                    # self.clear()
-                    
-                    # self.instrs.append(
-                    #     {"debug": [("vcompare", tmp_idx, [(round, group_id * block_size * vector_size + j, "wrapped_idx") for j in range(8)])]}
-                    # )
 
                 body_instrs = self.compile_kernel()
                 self.instrs.extend(body_instrs)

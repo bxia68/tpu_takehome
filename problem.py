@@ -271,7 +271,6 @@ class Machine:
     def load(self, core, *slot):
         match slot:
             case ("load", dest, addr):
-                print(dest, addr, core.scratch[addr])
                 self.scratch_write[dest] = self.mem[core.scratch[addr]]
             case ("load_offset", dest, addr, offset):
                 # Handy for treating vector dest and addr as a full block in the mini-compiler if you want
@@ -279,10 +278,9 @@ class Machine:
                     core.scratch[addr + offset]
                 ]
             case ("vload", dest, addr):  # addr is a scalar
-                addr_val = core.scratch[addr]
-                print(f"vload: dest={dest}, addr_scratch={addr}, addr_val={addr_val}, mem_len={len(self.mem)}")
+                addr = core.scratch[addr]
                 for vi in range(VLEN):
-                    self.scratch_write[dest + vi] = self.mem[addr_val + vi]
+                    self.scratch_write[dest + vi] = self.mem[addr + vi]
             case ("const", dest, val):
                 self.scratch_write[dest] = (val) % (2**32)
             case _:
