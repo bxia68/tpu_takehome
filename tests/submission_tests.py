@@ -8,28 +8,20 @@ from functools import lru_cache
 import unittest
 import random
 
-from frozen_problem import (
-    Machine,
-    build_mem_image,
-    reference_kernel2,
-    Tree,
-    Input,
-    N_CORES,
-    VLEN,
-)
+from frozen_problem import Machine, build_mem_image, reference_kernel2, Tree, Input, N_CORES, VLEN
 
-from kernel_builder import (
-    KernelBuilder
-)
+from kernel_builder import KernelBuilder
 
-from basic_pipelined_solution import (
-    BasicVectorizedKernelBuilder
-)
+from basic_vectorized_solution import BasicVectorizedKernelBuilder
+
+from specialized_compiled_solution import SpecializedCompiledSolution
+
 
 @lru_cache(maxsize=None)
 def kernel_builder(forest_height: int, n_nodes: int, batch_size: int, rounds: int):
     # kb = KernelBuilder()
-    kb = BasicVectorizedKernelBuilder()
+    # kb = BasicVectorizedKernelBuilder()
+    kb = SpecializedCompiledSolution()
     kb.build_kernel(forest_height, n_nodes, batch_size, rounds)
     return kb
 
@@ -53,10 +45,7 @@ def do_kernel_test(forest_height: int, rounds: int, batch_size: int):
         pass
 
     inp_values_p = ref_mem[6]
-    assert (
-        machine.mem[inp_values_p : inp_values_p + len(inp.values)]
-        == ref_mem[inp_values_p : inp_values_p + len(inp.values)]
-    ), "Incorrect output values"
+    assert machine.mem[inp_values_p : inp_values_p + len(inp.values)] == ref_mem[inp_values_p : inp_values_p + len(inp.values)], "Incorrect output values"
     print("CYCLES: ", machine.cycle)
     return machine.cycle
 
