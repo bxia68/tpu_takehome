@@ -15,9 +15,6 @@ class SpecializedCompiledSolution(DAGKernelBuilder):
             self.add("load", ("const", tmp0, i))
             self.add("load", ("load", self.scratch[v], tmp0))
 
-        # n_nodes_v = self.alloc_scratch("n_nodes_v", 8)
-        # self.instrs.append({"valu": [("vbroadcast", n_nodes_v, self.scratch["n_nodes"])]})
-
         # Pause instructions are matched up with yield statements in the reference
         # kernel to let you debug at intermediate steps. The testing harness in this
         # file requires these match up to the reference kernel's yields, but the
