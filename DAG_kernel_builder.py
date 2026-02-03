@@ -98,20 +98,55 @@ class DAGKernelBuilder(KernelBuilder):
     def compile_kernel(self) -> list[dict]:
         compiled_instructions = []
         engine_queue = {"alu": [], "valu": [], "load": [], "store": [], "flow": []}
+        engine_list = ["alu", "valu", "load", "store", "flow"]
 
         job_queue = deque()
         for current_id, indegree in enumerate(self.indegree):
             if indegree == 0:
                 job_queue.append(current_id)
 
-        pending_valu_half = None
-        while len(job_queue) > 0 or len([val for queue in engine_queue.values() for val in queue]) > 0:
+        def signal_war_dependents(instr_list):
+            """Signal WAR dependents - they can run in the same cycle"""
+            for instr in instr_list:
+                for dep in instr.dep_list:
+                    for adj_id in self.WAR_graph[(dep, self.dep_version[(instr.graph_id, dep)])]:
+                        self.indegree[adj_id] -= 1
+                        if self.indegree[adj_id] == 0:
+                            job_queue.append(adj_id)
+
+        def signal_raw_dependents(instr_list):
+            """Signal RAW dependents - they must wait for next cycle"""
+            for instr in instr_list:
+                for dst in instr.dst:
+                    for adj_id in self.RAW_graph[(dst, self.dst_version[(instr.graph_id, dst)])]:
+                        self.indegree[adj_id] -= 1
+                        if self.indegree[adj_id] == 0:
+                            job_queue.append(adj_id)
+
+        def drain_job_queue():
+            """Move ready instructions from job_queue to engine_queue"""
             while len(job_queue) > 0:
                 current_id = job_queue.popleft()
                 instruction = self.instruction_list[current_id]
                 engine_queue[instruction.engine].append(instruction)
 
-            engine_list = ["alu", "valu", "load", "store", "flow"]
+        def pack_engines(cycle_instructions):
+            """Pack instructions from engine queues into cycle, return newly added"""
+            newly_added = []
+            for engine in engine_list:
+                engine_queue[engine].sort(key=lambda x: x.graph_id)
+                avail_slots = SLOT_LIMITS[engine] - len(cycle_instructions.get(engine, []))
+                if avail_slots > 0 and len(engine_queue[engine]) > 0:
+                    to_add = engine_queue[engine][:avail_slots]
+                    cycle_instructions[engine] = cycle_instructions.get(engine, []) + [x.instruction for x in to_add]
+                    newly_added.extend(to_add)
+                    engine_queue[engine] = engine_queue[engine][avail_slots:]
+            return newly_added
+
+        pending_valu_half = None
+        while len(job_queue) > 0 or any(engine_queue.values()):
+            drain_job_queue()
+
             cycle_instructions = {}
             finished_list = []
 
@@ -121,56 +156,53 @@ class DAGKernelBuilder(KernelBuilder):
                 op, dest, a1, a2 = valu_instr.instruction
                 cycle_instructions["alu"] = [(op, dest + i, a1 + i, a2 + i) for i in range(half_start, 8)]
                 finished_list.append(valu_instr)
+                signal_war_dependents([valu_instr])
+                drain_job_queue()
                 pending_valu_half = None
 
-            # pack instructions from the queue into the current cycle
-            for engine in engine_list:
-                engine_queue[engine].sort(key=lambda x: x.graph_id)
-                if len(engine_queue[engine]) > 0:
-                    cycle_instructions[engine] = cycle_instructions.get(engine, []) + [x.instruction for x in engine_queue[engine][: SLOT_LIMITS[engine]]]
-                    finished_list.extend(engine_queue[engine][: SLOT_LIMITS[engine]])
-                    engine_queue[engine] = engine_queue[engine][SLOT_LIMITS[engine] :]
+            # pack instructions and process WAR dependents until no more can be added
+            while True:
+                newly_added = pack_engines(cycle_instructions)
+                if not newly_added:
+                    break
+                finished_list.extend(newly_added)
+                signal_war_dependents(newly_added)
+                drain_job_queue()
 
             # convert valu to alu ops if space available
-            alu_slots_available = SLOT_LIMITS["alu"] - len(cycle_instructions.get("alu", []))
-            while alu_slots_available >= 4 and len(engine_queue["valu"]) > 0:
-                # find a convertible valu instruction
-                found_idx = None
-                for idx, valu_instr in enumerate(engine_queue["valu"]):
-                    if valu_instr.instruction[0] not in ("vbroadcast", "multiply_add"):
-                        found_idx = idx
-                        break
-
+            alu_avail_slots = SLOT_LIMITS["alu"] - len(cycle_instructions.get("alu", []))
+            while alu_avail_slots >= 4 and len(engine_queue["valu"]) > 0:
+                found_idx = next((i for i, v in enumerate(engine_queue["valu"]) if v.instruction[0] not in ("vbroadcast", "multiply_add")), None)
                 if found_idx is None:
                     break
 
                 valu_instr = engine_queue["valu"].pop(found_idx)
                 op, dest, a1, a2 = valu_instr.instruction
 
-                if alu_slots_available >= 8:
-                    # full convert valu to alu instruction
+                if alu_avail_slots >= 8:
                     cycle_instructions["alu"] = cycle_instructions.get("alu", []) + [(op, dest + i, a1 + i, a2 + i) for i in range(8)]
                     finished_list.append(valu_instr)
-                    alu_slots_available -= 8
+                    signal_war_dependents([valu_instr])
+                    alu_avail_slots -= 8
                 else:
-                    # split value instruction
                     cycle_instructions["alu"] = cycle_instructions.get("alu", []) + [(op, dest + i, a1 + i, a2 + i) for i in range(4)]
                     pending_valu_half = (valu_instr, 4)
-                    alu_slots_available -= 4
+                    alu_avail_slots -= 4
+
+            # convert load const to flow add_imm
+            if len(cycle_instructions.get("flow", [])) == 0:
+                found_idx = next((i for i, l in enumerate(engine_queue["load"]) if l.instruction[0] == "const"), None)
+                if found_idx is not None:
+                    load_instr = engine_queue["load"].pop(found_idx)
+                    _, dest, val = load_instr.instruction
+                    cycle_instructions["flow"] = [("add_imm", dest, self.const_map[0], val)]
+                    finished_list.append(load_instr)
+                    signal_war_dependents([load_instr])
 
             compiled_instructions.append(cycle_instructions)
 
-            # signal dependent instructions
-            for finished in finished_list:
-                dependents = []
-                for dst in finished.dst:
-                    dependents.extend(self.RAW_graph[(dst, self.dst_version[(finished.graph_id, dst)])])
-                for dep in finished.dep_list:
-                    dependents.extend(self.WAR_graph[(dep, self.dep_version[(finished.graph_id, dep)])])
-                for adj_id in dependents:
-                    self.indegree[adj_id] -= 1
-                    if self.indegree[adj_id] == 0:
-                        job_queue.append(adj_id)
+            # Signal RAW dependents - they must wait for next cycle
+            signal_raw_dependents(finished_list)
 
         self.instrs.extend(compiled_instructions)
         self.clear()

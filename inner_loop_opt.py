@@ -8,8 +8,10 @@ ROUNDS = 16
 VECTOR_SIZE = 8
 LEVEL_COUNT = 11
 
-BLOCK_SIZE = int(os.getenv("BLOCK_SIZE", 4))
-TILE_SIZE = int(os.getenv("TILE_SIZE", 4))
+BLOCK_SIZE = 4
+TILE_SIZE = 4
+BLOCK_SIZE1 = int(os.getenv("BLOCK_SIZE", 4))
+TILE_SIZE1 = int(os.getenv("TILE_SIZE", 4))
 SYNC_LIST = list(map(int, os.getenv("SYNC_LIST", "14,15").split(","))) + [16]
 
 
@@ -24,20 +26,23 @@ def kernel(kb: DAGKernelBuilder):
 
     hash_array1 = kb.alloc_scratch("hash_array1", 6 * VECTOR_SIZE)
     hash_array2 = kb.alloc_scratch("hash_array2", 6 * VECTOR_SIZE)
-    for i in range(len(HASH_STAGES)):
-        kb.add_node(Instruction("valu", ("vbroadcast", hash_array1 + i * VECTOR_SIZE, kb.scratch_const(HASH_STAGES[i][1]))))
-        kb.add_node(Instruction("valu", ("vbroadcast", hash_array2 + i * VECTOR_SIZE, kb.scratch_const(HASH_STAGES[i][4]))))
-
-    # extra pre computed hash values for fma
-    # hash_mult0 = kb.alloc_scratch("hash_mult0", VECTOR_SIZE)  # 2^12 + 1 = 4097
-    # hash_mult2 = kb.alloc_scratch("hash_mult2", VECTOR_SIZE)  # 2^5 + 1 = 33
-    # hash_mult4 = kb.alloc_scratch("hash_mult4", VECTOR_SIZE)  # 2^3 + 1 = 9
-    # kb.add_node(Instruction("valu", ("vbroadcast", hash_mult0, kb.scratch_const(4097))))
-    # kb.add_node(Instruction("valu", ("vbroadcast", hash_mult2, kb.scratch_const(33))))
-    # kb.add_node(Instruction("valu", ("vbroadcast", hash_mult4, kb.scratch_const(9))))
+    # stage 0: val * 4097 + 0x7ED55D16
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array1, kb.scratch_const(0x7ED55D16))))
     kb.add_node(Instruction("valu", ("vbroadcast", hash_array2, kb.scratch_const(4097))))
+    # stage 1: (val ^ 0xC761C23C) ^ (val >> 19)
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array1 + 1 * VECTOR_SIZE, kb.scratch_const(0xC761C23C))))
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array2 + 1 * VECTOR_SIZE, kb.scratch_const(19))))
+    # stage 2+3 optimized: tmp1 = val*33 + (const2 + const3), tmp2 = val*(33*512) + (const2 << 9) = new_val << 9
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array1 + 2 * VECTOR_SIZE, kb.scratch_const((0x165667B1 + 0xD3A2646C) % (2**32)))))
     kb.add_node(Instruction("valu", ("vbroadcast", hash_array2 + 2 * VECTOR_SIZE, kb.scratch_const(33))))
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array1 + 3 * VECTOR_SIZE, kb.scratch_const((0x165667B1 << 9) % (2**32)))))
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array2 + 3 * VECTOR_SIZE, kb.scratch_const(33 * 512))))
+    # stage 4: val * 9 + 0xFD7046C5
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array1 + 4 * VECTOR_SIZE, kb.scratch_const(0xFD7046C5))))
     kb.add_node(Instruction("valu", ("vbroadcast", hash_array2 + 4 * VECTOR_SIZE, kb.scratch_const(9))))
+    # stage 5: (val ^ 0xB55A4F09) ^ (val >> 16)
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array1 + 5 * VECTOR_SIZE, kb.scratch_const(0xB55A4F09))))
+    kb.add_node(Instruction("valu", ("vbroadcast", hash_array2 + 5 * VECTOR_SIZE, kb.scratch_const(16))))
 
     # vector/scalar scratch registers
     tmp1_v = kb.alloc_scratch("tmp1_v", BLOCK_SIZE * TILE_SIZE * VECTOR_SIZE)
@@ -93,12 +98,38 @@ def kernel(kb: DAGKernelBuilder):
     generic_kernel(kb)
 
     for i in range(0, CHARACTER_COUNT, VECTOR_SIZE):
-        tmp_addr_1 = tmp_addr_v
-        tmp_addr_2 = tmp_addr_v + 1
+        tmp_addr_1 = tmp1_v + (i // VECTOR_SIZE)
+        tmp_addr_2 = tmp2_v + (i // VECTOR_SIZE)
         kb.add_node(Instruction("alu", ("+", tmp_addr_1, kb.scratch["inp_indices_p"], kb.scratch_const(i))))
         kb.add_node(Instruction("store", ("vstore", tmp_addr_1, idx_array + i)))
         kb.add_node(Instruction("alu", ("+", tmp_addr_2, kb.scratch["inp_values_p"], kb.scratch_const(i))))
         kb.add_node(Instruction("store", ("vstore", tmp_addr_2, val_array + i)))
+
+    counts = {"alu": 0, "valu": 0, "load": 0, "store": 0, "flow": 0}
+    for node in kb.instruction_list:
+        if node.engine in counts:
+            counts[node.engine] += 1
+
+    cycles = {"alu+valu": counts["alu"] / 12 + counts["valu"] / 7.5, "load": counts["load"] / 2, "store": counts["store"] / 2, "flow": counts["flow"]}
+    total_cycles = max(cycles.values())
+
+    # ANSI color codes
+    CYAN = "\033[96m"
+    BOLD = "\033[1m"
+    DIM = "\033[2m"
+    RESET = "\033[0m"
+
+    print(f"\n{BOLD}{CYAN}╔════════════════════════════════════════╗{RESET}")
+    print(f"{BOLD}{CYAN}║     KERNEL CYCLE SUMMARY               ║{RESET}")
+    print(f"{BOLD}{CYAN}╠════════════════════════════════════════╣{RESET}")
+    print(f"{BOLD}{CYAN}║{RESET}  ALU+VALU:  {cycles['alu+valu']:>8.1f} cycles            {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}║{RESET}  Load:      {cycles['load']:>8.1f} cycles            {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}║{RESET}  Store:     {cycles['store']:>8.1f} cycles            {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}║{RESET}  Flow:      {cycles['flow']:>8.1f} cycles            {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}╠════════════════════════════════════════╣{RESET}")
+    print(f"{BOLD}{CYAN}║{RESET}  {BOLD}TOTAL:     {total_cycles:>8.1f} cycles{RESET}            {BOLD}{CYAN}║{RESET}")
+    print(f"{BOLD}{CYAN}╚════════════════════════════════════════╝{RESET}")
+    print(f"{DIM}  (ALU: {counts['alu']}, VALU: {counts['valu']}, Load: {counts['load']}, Store: {counts['store']}, Flow: {counts['flow']}){RESET}\n")
 
     kb.compile_kernel()
 
@@ -184,22 +215,12 @@ def round_0_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, preloaded
         tmp_idx = kb.scratch["idx_array"] + i
         tmp_val = kb.scratch["val_array"] + i
 
-        # if not kb.loaded_node_cache[i // VECTOR_SIZE]:
-        #     tmp_addr_1 = kb.scratch["tmp_addr_v"] + (i // VECTOR_SIZE)
-        #     tmp_addr_2 = kb.scratch["tmp_addr_v"] + (i // VECTOR_SIZE) + 1
-        #     kb.add_node(Instruction("alu", ("+", tmp_addr_1, kb.scratch["inp_indices_p"], kb.scratch_const(i))))
-        #     kb.add_node(Instruction("load", ("vload", tmp_idx, tmp_addr_1)))
-        #     kb.add_node(Instruction("alu", ("+", tmp_addr_2, kb.scratch["inp_values_p"], kb.scratch_const(i))))
-        #     kb.add_node(Instruction("load", ("vload", tmp_val, tmp_addr_2)))
-        #     kb.loaded_node_cache[i // VECTOR_SIZE] = True
-
         # val = myhash(val ^ node_val) (vectorized)
         kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, root_val)))
         vhash(kb, tmp1, tmp2, tmp_val)
 
-        # idx = 0 if val % 2 == 0 else 1 (offset idx by -1 for easier select usage)
-        kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-        kb.add_node(Instruction("flow", ("vselect", tmp_idx, tmp1, kb.scratch["const_1"], kb.scratch["const_0"])))
+        # idx = 0 if val % 2 == 0 else 1 (offset idx by -1 for easier future select usage)
+        kb.add_node(Instruction("valu", ("&", tmp_idx, tmp_val, kb.scratch["const_1"])))
 
 
 def round_1_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, preloaded: bool):
@@ -231,9 +252,9 @@ def round_1_kernel(kb: DAGKernelBuilder, group_id: int, block_id: int, preloaded
         kb.add_node(Instruction("valu", ("^", tmp_val, tmp_val, tmp_node_val)))
         vhash(kb, tmp1, tmp2, tmp_val)
 
-        # idx = 2*(idx + 1) + (1 if val % 2 == 0 else 2) (idx is offset by -1 for easier select usage)
-        kb.add_node(Instruction("valu", ("%", tmp1, tmp_val, kb.scratch["const_2"])))
-        kb.add_node(Instruction("flow", ("vselect", tmp3, tmp1, kb.scratch["const_4"], kb.scratch["const_3"])))
+        # idx = 2*(idx + 1) + (1 if val % 2 == 0 else 2) (idx is offset by -1 for easier future select usage)
+        kb.add_node(Instruction("valu", ("&", tmp1, tmp_val, kb.scratch["const_1"])))
+        kb.add_node(Instruction("valu", ("+", tmp3, tmp1, kb.scratch["const_3"])))
         kb.add_node(Instruction("valu", ("multiply_add", tmp_idx, tmp_idx, kb.scratch["const_2"], tmp3)))
 
 
@@ -337,30 +358,24 @@ def round_3_kernel(kb: DAGKernelBuilder, group_id: bool, block_id: int, preloade
 
 # 12 valu instructions
 def vhash(kb: DAGKernelBuilder, tmp1: int, tmp2: int, tmp_val: int):
-    # Unrolled HASH_STAGES loop
-    # Stage 0: ("+", 0x7ED55D16, "+", "<<", 12)
-    # kb.add_node(Instruction("valu", ("multiply_add", tmp_val, tmp_val, kb.scratch["hash_mult0"], kb.scratch["hash_array1"] + 0 * VECTOR_SIZE)))
+    # unrolled HASH_STAGES loop
+    # stage 0: val = (val << 12) + val + 0x7ED55D16 = val * 4097 + 0x7ED55D16
     kb.add_node(Instruction("valu", ("multiply_add", tmp_val, tmp_val, kb.scratch["hash_array2"], kb.scratch["hash_array1"])))
 
-    # Stage 1: ("^", 0xC761C23C, "^", ">>", 19)
+    # stage 1: val = (val ^ 0xC761C23C) ^ (val >> 19)
     kb.add_node(Instruction("valu", ("^", tmp1, tmp_val, kb.scratch["hash_array1"] + 1 * VECTOR_SIZE)))
     kb.add_node(Instruction("valu", (">>", tmp2, tmp_val, kb.scratch["hash_array2"] + 1 * VECTOR_SIZE)))
     kb.add_node(Instruction("valu", ("^", tmp_val, tmp1, tmp2)))
 
-    # Stage 2: ("+", 0x165667B1, "+", "<<", 5)
-    # kb.add_node(Instruction("valu", ("multiply_add", tmp_val, tmp_val, kb.scratch["hash_mult2"], kb.scratch["hash_array1"] + 2 * VECTOR_SIZE)))
-    kb.add_node(Instruction("valu", ("multiply_add", tmp_val, tmp_val, kb.scratch["hash_array2"] + 2 * VECTOR_SIZE, kb.scratch["hash_array1"] + 2 * VECTOR_SIZE)))
-
-    # Stage 3: ("+", 0xD3A2646C, "^", "<<", 9)
-    kb.add_node(Instruction("valu", ("+", tmp1, tmp_val, kb.scratch["hash_array1"] + 3 * VECTOR_SIZE)))
-    kb.add_node(Instruction("valu", ("<<", tmp2, tmp_val, kb.scratch["hash_array2"] + 3 * VECTOR_SIZE)))
+    # stage 2+3 optimized: val = val * 33 + (0x165667B1 + 0xD3A2646C), then shift uses FMA to undo add
+    kb.add_node(Instruction("valu", ("multiply_add", tmp1, tmp_val, kb.scratch["hash_array2"] + 2 * VECTOR_SIZE, kb.scratch["hash_array1"] + 2 * VECTOR_SIZE)))
+    kb.add_node(Instruction("valu", ("multiply_add", tmp2, tmp_val, kb.scratch["hash_array2"] + 3 * VECTOR_SIZE, kb.scratch["hash_array1"] + 3 * VECTOR_SIZE)))
     kb.add_node(Instruction("valu", ("^", tmp_val, tmp1, tmp2)))
 
-    # Stage 4: ("+", 0xFD7046C5, "+", "<<", 3)
-    # kb.add_node(Instruction("valu", ("multiply_add", tmp_val, tmp_val, kb.scratch["hash_mult4"], kb.scratch["hash_array1"] + 4 * VECTOR_SIZE)))
+    # stage 4: val = (val << 3) + val + 0xFD7046C5 = val * 9 + 0xFD7046C5
     kb.add_node(Instruction("valu", ("multiply_add", tmp_val, tmp_val, kb.scratch["hash_array2"] + 4 * VECTOR_SIZE, kb.scratch["hash_array1"] + 4 * VECTOR_SIZE)))
 
-    # Stage 5: ("^", 0xB55A4F09, "^", ">>", 16)
+    # stage 5: val = (val ^ 0xB55A4F09) ^ (val >> 16)
     kb.add_node(Instruction("valu", ("^", tmp1, tmp_val, kb.scratch["hash_array1"] + 5 * VECTOR_SIZE)))
     kb.add_node(Instruction("valu", (">>", tmp2, tmp_val, kb.scratch["hash_array2"] + 5 * VECTOR_SIZE)))
     kb.add_node(Instruction("valu", ("^", tmp_val, tmp1, tmp2)))
