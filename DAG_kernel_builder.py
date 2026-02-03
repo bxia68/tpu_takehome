@@ -21,6 +21,9 @@ class Instruction:
         if engine == "store" or instruction[0] == "trace_write":
             self.dst = []
             self.dep_list = instruction[1:]
+        elif engine == "load" and instruction[0] == "const":
+            self.dst = [instruction[1]]
+            self.dep_list = []
         else:
             self.dst = [instruction[1]]
             self.dep_list = instruction[2:]
@@ -61,6 +64,13 @@ class DAGKernelBuilder(KernelBuilder):
         self.cache_versions = [0] * 1536
         self.instruction_count = 0
         self.finished_set = set()
+
+    def scratch_const(self, val, name=None):
+        if val not in self.const_map:
+            addr = self.alloc_scratch(name)
+            self.add_node(Instruction("load", ("const", addr, val)))
+            self.const_map[val] = addr
+        return self.const_map[val]
 
     def add_node(self, instruction: Instruction):
         # add instruction

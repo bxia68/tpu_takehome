@@ -12,8 +12,9 @@ class SpecializedCompiledSolution(DAGKernelBuilder):
         for v in init_vars:
             self.alloc_scratch(v, 1)
         for i, v in enumerate(init_vars):
-            self.add("load", ("const", tmp0, i))
-            self.add("load", ("load", self.scratch[v], tmp0))
+            if v in ["forest_values_p", "inp_indices_p", "inp_values_p"]:
+                self.add_node(Instruction("load", ("const", tmp0, i)))
+                self.add_node(Instruction("load", ("load", self.scratch[v], tmp0)))
 
         # Pause instructions are matched up with yield statements in the reference
         # kernel to let you debug at intermediate steps. The testing harness in this
@@ -24,3 +25,5 @@ class SpecializedCompiledSolution(DAGKernelBuilder):
         self.add("debug", ("comment", "Starting loop"))
 
         inner_loop_opt.kernel(self)
+        
+        print("scratch_ptr:", self.scratch_ptr)
