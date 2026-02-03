@@ -61,7 +61,7 @@ class DAGKernelBuilder(KernelBuilder):
         self.dst_version = {}  # (instruction id, cache addr) (int, int) -> dst cache version (int)
         self.dep_version = {}  # (instruction id, cache addr) (int, int) -> dep cache version (int)
         self.WAR_indegree = defaultdict(int)
-        self.cache_versions = [0] * 1536
+        self.cache_versions = [0] * SCRATCH_SIZE
         self.instruction_count = 0
         self.finished_set = set()
 
